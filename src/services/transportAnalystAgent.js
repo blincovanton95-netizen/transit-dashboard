@@ -8,17 +8,35 @@
  */
 
 import { useRealtimeStore } from '@/stores/realtimeStore'
-import { useUiStore } from '@/stores/uiStore'
+import { useUiStore, MOSCOW_REGIONS } from '@/stores/uiStore'
 import { useAnalyticsStore } from '@/stores/analyticsStore'
 
 // ============================================
 // INTENT PATTERNS (Распознавание намерений)
 // ============================================
 
+const REGION_MAP = {
+  'северо-запад': 'northwest',
+  'северо-западе': 'northwest',
+  'сз': 'northwest',
+  'северо-восток': 'northeast',
+  'северо-востоке': 'northeast',
+  'св': 'northeast',
+  'юго-запад': 'southwest',
+  'юго-западе': 'southwest',
+  'юз': 'southwest',
+  'юго-восток': 'southeast',
+  'юго-востоке': 'southeast',
+  'юв': 'southeast',
+  'центр': 'center',
+  'центре': 'center'
+}
+
 const INTENT_PATTERNS = {
-  // Фильтрация карты
+  // Фильтрация карты по типу и региону
   FILTER_MAP: {
     patterns: [
+      /покажи\s+(трамваи|автобусы|троллейбусы|транспорт).*?(северо[-\s]?запад(?:е)?|северо-восток(?:е)?|юго[-\s]?запад(?:е)?|юго[-\s]?восток(?:е)?|центр(?:е)?|сз|св|юз|юв)/i,
       /покажи\s+(только|лишь)\s+(автобусы|троллейбусы|трамваи)/i,
       /добавь\s+на\s+карту\s+(автобусы|троллейбусы|трамваи)/i,
       /убери\s+(автобусы|троллейбусы|трамваи)/i,
@@ -27,7 +45,8 @@ const INTENT_PATTERNS = {
       /оставь\s+только\s+карту/i
     ],
     params: {
-      vehicleType: /(автобусы|троллейбусы|трамваи)/i,
+      vehicleType: /(автобусы|троллейбусы|трамваи|транспорт)/i,
+      region: /(северо[-\s]?запад(?:е)?|северо-восток(?:е)?|юго[-\s]?запад(?:е)?|юго[-\s]?восток(?:е)?|центр(?:е)?|сз|св|юз|юв)/i,
       action: /(покажи|добавь|убери|спрячь|оставь)/i
     }
   },
@@ -128,9 +147,15 @@ const RESPONSE_TEMPLATES = {
   FILTER_MAP: (params, result) => {
     const count = result?.count || 0
     const type = params.vehicleType || 'транспорт'
+    const typeLabel = getVehicleTypeLabel(type)
     
     if (params.action?.includes('спрячь') || params.action?.includes('оставь')) {
       return `✅ Графики скрыты. Отображается только карта с ${count} единицами транспорта.`
+    }
+
+    if (params.region) {
+      const regionName = result?.regionName || params.region
+      return `✅ Показано ${count} ${typeLabel} на ${regionName}.`
     }
     
     return `✅ На карту добавлены ${count} ${type}. Из них ${result?.delayed || 0} опаздывают.`
@@ -204,6 +229,7 @@ const RESPONSE_TEMPLATES = {
       `• "Построй график загрузки маршрута 555 за неделю"\n` +
       `• "Сравни пассажиропоток на остановках А и Б"\n\n` +
       `🗺️ **Карта:**\n` +
+      `• "Покажи трамваи на северо-западе"\n` +
       `• "Добавь на карту только троллейбусы"\n` +
       `• "Спрячь все графики"\n\n` +
       `📈 **Метрики:**\n` +
@@ -216,6 +242,38 @@ const RESPONSE_TEMPLATES = {
 // ============================================
 // CORE FUNCTIONS
 // ============================================
+
+function getVehicleTypeLabel(type) {
+  const map = {
+    'автобусы': 'автобусов',
+    'троллейбусы': 'троллейбусов',
+    'трамваи': 'трамваев',
+    'транспорт': 'единиц транспорта',
+    bus: 'автобусов',
+    trolleybus: 'троллейбусов',
+    tram: 'трамваев'
+  }
+  return map[type?.toLowerCase()] || 'единиц транспорта'
+}
+
+function resolveRegionKey(regionText) {
+  if (!regionText) return null
+  const key = regionText.toLowerCase().replace(/\s+/g, '-')
+  return REGION_MAP[key] || REGION_MAP[regionText.toLowerCase()] || null
+}
+
+function countFilteredVehicles(uiStore) {
+  const realtimeStore = useRealtimeStore()
+  let count = 0
+  let delayed = 0
+  realtimeStore.vehicles.forEach(v => {
+    if (uiStore.matchesFilters(v)) {
+      count++
+      if (v.delay > 300) delayed++
+    }
+  })
+  return { count, delayed }
+}
 
 /**
  * Распознать намерение из текста
@@ -267,20 +325,35 @@ function buildCommand(intent, params) {
   
   switch (intent) {
     case 'FILTER_MAP':
-      if (params.vehicleType) {
+      if (params.vehicleType && !params.action?.includes('убери')) {
         const typeMap = {
           'автобусы': 'bus',
           'троллейбусы': 'trolleybus',
-          'трамваи': 'tram'
+          'трамваи': 'tram',
+          'транспорт': ['bus', 'trolleybus', 'tram']
         }
+        const raw = params.vehicleType.toLowerCase()
+        const types = typeMap[raw]
         commands.push({
           type: 'SET_VEHICLE_FILTER',
           payload: {
-            vehicleTypes: params.action?.includes('убери') 
-              ? [] 
-              : [typeMap[params.vehicleType.toLowerCase()] || params.vehicleType]
+            vehicleTypes: Array.isArray(types) ? types : [types || raw]
           }
         })
+      } else if (params.action?.includes('убери') && params.vehicleType) {
+        commands.push({
+          type: 'SET_VEHICLE_FILTER',
+          payload: { vehicleTypes: [] }
+        })
+      }
+      if (params.region) {
+        const regionKey = resolveRegionKey(params.region)
+        if (regionKey) {
+          commands.push({
+            type: 'SET_REGION_FILTER',
+            payload: { region: regionKey }
+          })
+        }
       }
       if (params.action?.includes('спрячь') || params.action?.includes('оставь')) {
         commands.push({
@@ -342,9 +415,14 @@ async function executeCommand(command) {
   switch (command.type) {
     case 'SET_VEHICLE_FILTER':
       uiStore.setFilter('vehicleTypes', command.payload.vehicleTypes)
+      result = countFilteredVehicles(uiStore)
+      break
+
+    case 'SET_REGION_FILTER':
+      uiStore.setRegionFilter(command.payload.region)
       result = {
-        count: realtimeStore.vehicles.size,
-        delayed: realtimeStore.delayedVehicles.length
+        ...countFilteredVehicles(uiStore),
+        regionName: MOSCOW_REGIONS[command.payload.region]?.name || command.payload.region
       }
       break
       
@@ -366,11 +444,11 @@ async function executeCommand(command) {
         command.payload.routeId,
         command.payload.period
       )
-      uiStore.addChart({
-        type: command.payload.chartType,
-        data: chartData,
-        title: `График ${command.payload.metric}`
-      })
+      uiStore.addChart(analyticsStore.toChartConfig(
+        chartData,
+        command.payload.chartType,
+        `График ${command.payload.metric}`
+      ))
       result = { chartType: command.payload.chartType }
       break
       

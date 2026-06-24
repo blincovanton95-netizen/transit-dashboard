@@ -17,8 +17,8 @@
     <!-- Счётчик ТС -->
     <div class="vehicle-counter">
       <div class="counter-item">
-        <span class="counter-value">{{ realtimeStore.vehicles.size }}</span>
-        <span class="counter-label">ТС на линии</span>
+        <span class="counter-value">{{ visibleCount }}</span>
+        <span class="counter-label">{{ filterLabel }}</span>
       </div>
       <div class="counter-item">
         <span class="counter-value warning">{{ delayedCount }}</span>
@@ -37,9 +37,12 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import L from 'leaflet'
-import { useRealtimeStore } from '@/stores/realtimeStore'
-import { useUiStore } from '@/stores/uiStore'
 import 'leaflet/dist/leaflet.css'
+import 'leaflet.markercluster'
+import 'leaflet.markercluster/dist/MarkerCluster.css'
+import 'leaflet.markercluster/dist/MarkerCluster.Default.css'
+import { useRealtimeStore } from '@/stores/realtimeStore'
+import { useUiStore, MOSCOW_REGIONS } from '@/stores/uiStore'
 
 const realtimeStore = useRealtimeStore()
 const uiStore = useUiStore()
@@ -85,8 +88,8 @@ const statusColors = {
 const availableLayers = [
   { id: 'vehicles', name: 'Транспорт', icon: '🚌', color: '#3b82f6' },
   { id: 'routes', name: 'Маршруты', icon: '🛣️', color: '#22c55e' },
-  { id: 'stops', name: 'Остановки', icon: '🚏', color: '#f59e0b' },
-  { id: 'incidents', name: 'Инциденты', icon: '⚠️', color: '#ef4444' }
+  { id: 'stops', name: 'Остановки', icon: '', color: '#f59e0b' },
+  { id: 'incidents', name: 'Инциденты', icon: '️', color: '#ef4444' }
 ]
 
 // ============================================
@@ -96,9 +99,19 @@ const availableLayers = [
 const delayedCount = computed(() => {
   let count = 0
   realtimeStore.vehicles.forEach(v => {
-    if (v.delay > 300) count++ // > 5 минут
+    if (v.delay > 300 && uiStore.matchesFilters(v)) count++
   })
   return count
+})
+
+const visibleCount = computed(() => uiStore.filteredVehicleCount)
+
+const filterLabel = computed(() => {
+  const region = uiStore.map.filters.region
+  if (region && MOSCOW_REGIONS[region]) {
+    return `ТС (${MOSCOW_REGIONS[region].name})`
+  }
+  return 'ТС на карте'
 })
 
 const connectionStatus = computed(() => realtimeStore.connection.status)
@@ -126,11 +139,24 @@ function initMap() {
 
   // Базовый слой — OpenStreetMap
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19
+    maxZoom: 19,
+    attribution: '© OpenStreetMap'
   }).addTo(map)
 
-  // Слой для маркеров (отдельная группа для быстрого обновления)
-  markersLayer = L.layerGroup().addTo(map)
+  // 🔹 КРИТИЧНО: Используем кластеризацию для производительности
+  markersLayer = L.markerClusterGroup({
+    maxClusterRadius: 50,
+    spiderfyOnMaxZoom: true,
+    showCoverageOnHover: false,
+    iconCreateFunction: (cluster) => {
+      const count = cluster.getChildCount()
+      return L.divIcon({
+        html: `<div class="cluster-icon">${count}</div>`,
+        className: 'marker-cluster-custom',
+        iconSize: [40, 40]
+      })
+    }
+  }).addTo(map)
 
   // Сохранение позиции карты в UI store
   map.on('moveend', () => {
@@ -153,7 +179,7 @@ function initMap() {
 // ============================================
 
 /**
- * КРИТИЧНО: Используем Map для O(1) доступа к маркерам
+ * 🔹 КРИТИЧНО: Используем Map для O(1) доступа к маркерам
  * Не пересоздаём маркеры при каждом обновлении — только двигаем
  */
 const markerCache = new Map() // vehicleId -> L.Marker
@@ -207,18 +233,7 @@ function updateMarkers() {
 }
 
 function shouldShowVehicle(vehicle) {
-  const filters = uiStore.map.filters
-  
-  // Фильтр по типу
-  if (!filters.vehicleTypes.includes(vehicle.type)) return false
-  
-  // Фильтр по маршруту
-  if (filters.routes.length > 0 && !filters.routes.includes(vehicle.routeId)) return false
-  
-  // Фильтр по статусу
-  if (!filters.statuses.includes(vehicle.status)) return false
-  
-  return true
+  return uiStore.matchesFilters(vehicle)
 }
 
 function getIconForVehicle(vehicle) {
@@ -312,7 +327,7 @@ function getStatusLabel(status) {
 // ============================================
 
 /**
- * 🔹 КРИТИЧНО: Интерполяция координат между обновлениями из потока
+ *  КРИТИЧНО: Интерполяция координат между обновлениями из потока
  * Без этого маркеры будут "прыгать" каждые 5 секунд
  */
 function startAnimation() {
@@ -350,6 +365,20 @@ onUnmounted(() => {
   if (map) map.remove()
   markerCache.clear()
 })
+
+// Реакция на изменение фильтров и региона
+watch(() => uiStore.map.filters, () => {
+  updateMarkers()
+}, { deep: true })
+
+watch(() => uiStore.map.fitBounds, (bounds) => {
+  if (!map || !bounds) return
+  const leafletBounds = L.latLngBounds(
+    [bounds.south, bounds.west],
+    [bounds.north, bounds.east]
+  )
+  map.flyToBounds(leafletBounds, { padding: [40, 40], duration: 1.2 })
+}, { deep: true })
 
 // Реакция на изменение слоёв
 watch(() => uiStore.map.layers, () => {
@@ -513,6 +542,25 @@ watch(() => uiStore.map.layers, () => {
   font-weight: bold;
   display: grid;
   place-items: center;
+}
+
+/* Кластеры */
+:deep(.marker-cluster-custom) {
+  background: transparent !important;
+}
+
+:deep(.cluster-icon) {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.8);
+  color: white;
+  display: grid;
+  place-items: center;
+  font-weight: bold;
+  font-size: 14px;
+  border: 3px solid white;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
 }
 
 /* Popup стили */

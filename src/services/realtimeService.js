@@ -27,7 +27,8 @@ class RealtimeService {
   connect(callbacks) {
     this.callbacks = { ...this.callbacks, ...callbacks }
     
-    const url = `${import.meta.env.VITE_API_URL || 'http://localhost:3001'}/api/realtime/stream`
+    const base = import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? 'http://localhost:3001' : '')
+    const url = `${base}/api/realtime/stream`
     
     try {
       this.eventSource = new EventSource(url)

@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: transit-dashboard-mock
+    env: node
+    rootDir: mock-backend
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: VEHICLE_COUNT
+        value: 250
+      - key: NODE_ENV
+        value: production

@@ -3,21 +3,22 @@
     <div class="chart-header">
       <h3 class="chart-title">{{ title }}</h3>
       <div v-if="showActions" class="chart-actions">
-        <button class="action-btn" @click="$emit('export', 'png')" title="Экспорт PNG">📷</button>
-        <button class="action-btn" @click="$emit('export', 'csv')" title="Экспорт CSV">📄</button>
+        <button class="action-btn" @click="exportChart('png')" title="Экспорт PNG">📷</button>
+        <button class="action-btn" @click="exportChart('csv')" title="Экспорт CSV"></button>
         <button class="action-btn" @click="$emit('close')" title="Закрыть">✕</button>
       </div>
     </div>
-    <div class="chart-wrapper">
-      <Line v-if="type === 'line'" :data="chartData" :options="chartOptions" />
-      <Bar v-else-if="type === 'bar'" :data="chartData" :options="chartOptions" />
-      <Doughnut v-else-if="type === 'doughnut'" :data="chartData" :options="chartOptions" />
+    <div class="chart-wrapper" ref="chartWrapper">
+      <Line v-if="type === 'line'" :key="renderKey" ref="chartRef" :data="chartData" :options="chartOptions" />
+      <Bar v-else-if="type === 'bar'" :key="renderKey" ref="chartRef" :data="chartData" :options="chartOptions" />
+      <Doughnut v-else-if="type === 'doughnut'" :key="renderKey" ref="chartRef" :data="chartData" :options="chartOptions" />
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { debounce } from '@/utils/debounce'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -53,8 +54,8 @@ const props = defineProps({
     validator: v => ['line', 'bar', 'doughnut'].includes(v)
   },
   title: { type: String, default: 'График' },
-  labels: { type: Array, required: true },
-  datasets: { type: Array, required: true },
+  labels: { type: Array, default: () => [] },
+  datasets: { type: Array, default: () => [] },
   showActions: { type: Boolean, default: true },
   yLabel: { type: String, default: '' },
   xLabel: { type: String, default: '' }
@@ -62,18 +63,36 @@ const props = defineProps({
 
 const emit = defineEmits(['export', 'close'])
 
+const chartRef = ref(null)
+const chartWrapper = ref(null)
+const renderKey = ref(0)
+
+const debouncedBump = debounce(() => {
+  renderKey.value++
+}, 150)
+
+// ============================================
+// COMPUTED
+// ============================================
+
 const chartData = computed(() => ({
   labels: props.labels,
   datasets: props.datasets.map(ds => ({
     ...ds,
     borderColor: ds.color || '#3b82f6',
-    backgroundColor: ds.color 
-      ? `${ds.color}33` 
+    backgroundColor: ds.color
+      ? `${ds.color}33`
       : 'rgba(59, 130, 246, 0.2)',
     tension: 0.3,
     fill: props.type === 'line'
   }))
 }))
+
+watch(
+  () => [props.labels, props.datasets, props.type],
+  () => debouncedBump(),
+  { deep: true }
+)
 
 const chartOptions = computed(() => ({
   responsive: true,
@@ -112,6 +131,55 @@ const chartOptions = computed(() => ({
     }
   }
 }))
+
+// ============================================
+// DEBOUNCE ДЛЯ ОПТИМИЗАЦИИ
+// ============================================
+
+let debounceTimer = null
+
+// ============================================
+// ЭКСПОРТ
+// ============================================
+
+function exportChart(format) {
+  if (!chartRef.value) return
+  
+  const chart = chartRef.value.chart
+  
+  if (format === 'png') {
+    const url = chart.toBase64Image()
+    const link = document.createElement('a')
+    link.download = `${props.title.replace(/\s+/g, '_')}.png`
+    link.href = url
+    link.click()
+  } else if (format === 'csv') {
+    let csv = props.labels.join(',') + '\n'
+    props.datasets.forEach(ds => {
+      csv += ds.label + ',' + ds.data.join(',') + '\n'
+    })
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.download = `${props.title.replace(/\s+/g, '_')}.csv`
+    link.href = url
+    link.click()
+  }
+  
+  emit('export', format)
+}
+
+// ============================================
+// LIFECYCLE
+// ============================================
+
+onMounted(() => {
+  // Инициализация при монтировании
+})
+
+onUnmounted(() => {
+  if (debounceTimer) clearTimeout(debounceTimer)
+})
 </script>
 
 <style scoped>
